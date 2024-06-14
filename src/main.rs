@@ -2,54 +2,62 @@ use std::collections::HashMap;
 use std::env;
 use std::error::Error;
 
-use std::fs::File;
-use std::io;
-use std::io::Write;
 use std::process;
 
 use account::Account;
 use account::Transaction;
-use csv::Trim;
-
+use csv_async::Trim;
+use std::sync::Arc;
+use tokio::fs::File;
+use tokio::sync::Mutex;
+use tokio_stream::StreamExt;
 mod account;
-fn main() -> Result<(), Box<dyn Error>> {
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = env::args().collect();
 
-    let _config = Config::build(&args).unwrap_or_else(|err| {
+    let config = Config::build(&args).unwrap_or_else(|err| {
         println!("Problem parsing arguments: {err}");
         process::exit(1);
     });
-
-    let transactions = read_transactions(&args[1])?;
-    let accounts = process_transactions(transactions);
-    output_accounts(&accounts, &mut io::stdout())?;
+    let accounts = Arc::new(Mutex::new(HashMap::new()));
+    let deposits = Arc::new(Mutex::new(HashMap::new()));
+    process_transactions(&config.file_path, accounts.clone(), deposits.clone()).await?;
+    output_accounts(accounts.clone()).await?;
 
     Ok(())
 }
 
-fn read_transactions(filename: &str) -> Result<Vec<Transaction>, Box<dyn Error>> {
-    println!("in read-transactions");
-    let file = File::open(filename)?;
-    let mut rdr = csv::ReaderBuilder::new().trim(Trim::All).from_reader(file);
-    let headers = rdr.headers()?;
-    println!("headers: {:?}", headers);
-    let mut transactions = Vec::new();
-    for result in rdr.deserialize() {
-        println!("in for loop");
-        println!("result: {:?}", result);
-        let record: Transaction = result?;
-        transactions.push(record);
-    }
-    println!("reached end of read transactions");
-    Ok(transactions)
-}
+// fn read_transactions(filename: &str) -> Result<Vec<Transaction>, Box<dyn Error>> {
+//     println!("in read-transactions");
+//     let file = File::open(filename)?;
+//     let mut rdr = csv::ReaderBuilder::new().trim(Trim::All).from_reader(file);
+//     let headers = rdr.headers()?;
+//     println!("headers: {:?}", headers);
+//     let mut transactions = Vec::new();
+//     for result in rdr.deserialize() {
+//         println!("in for loop");
+//         println!("result: {:?}", result);
+//         let record: Transaction = result?;
+//         transactions.push(record);
+//     }
+//     println!("reached end of read transactions");
+//     Ok(transactions)
+// }
 
-fn process_transactions(transactions: Vec<Transaction>) -> HashMap<u16, Account> {
-    println!("reached process transactions");
-    let mut accounts: HashMap<u16, Account> = HashMap::new();
-    let mut deposits: HashMap<u32, (u16, f64)> = HashMap::new();
-
-    for transaction in transactions {
+async fn process_transactions(
+    file: &str,
+    accounts: Arc<Mutex<HashMap<u16, Account>>>,
+    deposits: Arc<Mutex<HashMap<u32, (u16, f64)>>>,
+) -> Result<(), Box<dyn Error>> {
+    let mut csv_reader = csv_async::AsyncReaderBuilder::new()
+        .trim(Trim::All)
+        .create_deserializer(File::open(file).await?);
+    while let Some(record) = csv_reader.deserialize::<Transaction>().next().await {
+        let transaction = record?;
+        let mut accounts = accounts.lock().await;
+        let mut deposits = deposits.lock().await;
         let account = accounts
             .entry(transaction.client)
             .or_insert_with(Account::new);
@@ -97,25 +105,28 @@ fn process_transactions(transactions: Vec<Transaction>) -> HashMap<u16, Account>
         }
     }
 
-    accounts
+    Ok(())
 }
 
-fn output_accounts<W: Write>(accounts: &HashMap<u16, Account>, writer: &mut W) -> csv::Result<()> {
-    println!("reached output_accounts");
-    let mut wtr = csv::Writer::from_writer(writer);
-    wtr.write_record(&["client", "available", "held", "total", "locked"])?;
-    for (client, account) in accounts {
+async fn output_accounts(accounts: Arc<Mutex<HashMap<u16, Account>>>) -> csv_async::Result<()> {
+    let accounts = accounts.lock().await;
+    let mut wtr = csv_async::AsyncWriter::from_writer(tokio::io::stdout());
+    wtr.write_record(&["client", "available", "held", "total", "locked"])
+        .await?;
+    for (client, account) in accounts.iter() {
         wtr.write_record(&[
             client.to_string(),
             format!("{:.4}", account.available),
             format!("{:.4}", account.held),
             format!("{:.4}", account.total),
             account.locked.to_string(),
-        ])?;
+        ])
+        .await?;
     }
-    wtr.flush()?;
+    wtr.flush().await?;
     Ok(())
 }
+
 struct Config {
     file_path: String,
     //output_file_path: String

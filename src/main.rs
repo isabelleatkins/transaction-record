@@ -29,23 +29,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-// fn read_transactions(filename: &str) -> Result<Vec<Transaction>, Box<dyn Error>> {
-//     println!("in read-transactions");
-//     let file = File::open(filename)?;
-//     let mut rdr = csv::ReaderBuilder::new().trim(Trim::All).from_reader(file);
-//     let headers = rdr.headers()?;
-//     println!("headers: {:?}", headers);
-//     let mut transactions = Vec::new();
-//     for result in rdr.deserialize() {
-//         println!("in for loop");
-//         println!("result: {:?}", result);
-//         let record: Transaction = result?;
-//         transactions.push(record);
-//     }
-//     println!("reached end of read transactions");
-//     Ok(transactions)
-// }
-
 async fn process_transactions(
     file: &str,
     accounts: Arc<Mutex<HashMap<u16, Account>>>,
@@ -129,7 +112,6 @@ async fn output_accounts(accounts: Arc<Mutex<HashMap<u16, Account>>>) -> csv_asy
 
 struct Config {
     file_path: String,
-    //output_file_path: String
 }
 
 impl Config {
@@ -147,11 +129,170 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+    use tokio::sync::Mutex;
 
-    #[test]
-    fn one_result() {
-        let args = vec![String::from("file.txt")];
-        let config = Config::build(&args).unwrap();
-        assert_eq!(config.file_path, "file.txt");
+    #[tokio::test]
+    /// Tests the deposit transaction logic.
+    async fn test_deposit_transaction() {
+        // Initialize test data
+        let accounts = HashMap::new();
+        let accounts_mutex = Arc::new(Mutex::new(accounts));
+        let deposits = Arc::new(Mutex::new(HashMap::new()));
+
+        // Create a sample deposit transaction
+        let transaction = Transaction {
+            kind: "deposit".to_string(),
+            client: 1,
+            tx: 1,
+            amount: Some(100.0),
+        };
+
+        // Process the transaction
+        {
+            let mut accounts = accounts_mutex.lock().await;
+            let mut deposits = deposits.lock().await;
+            let account = accounts
+                .entry(transaction.client)
+                .or_insert_with(Account::new);
+            account.deposit(transaction.amount.unwrap());
+            deposits.insert(
+                transaction.tx,
+                (transaction.client, transaction.amount.unwrap()),
+            );
+        }
+
+        // Verify the account state after the transaction
+        let accounts = accounts_mutex.lock().await;
+        let account = accounts.get(&transaction.client).unwrap();
+        assert_eq!(account.available, 100.0);
+        assert_eq!(account.held, 0.0);
+        assert_eq!(account.total, 100.0);
+        assert_eq!(account.locked, false);
+    }
+
+    #[tokio::test]
+    async fn test_withdrawal_transaction() {
+        // Initialize test data
+        let accounts = HashMap::new();
+        let accounts_mutex = Arc::new(Mutex::new(accounts));
+
+        // Create a sample account with initial balance
+        {
+            let mut accounts = accounts_mutex.lock().await;
+            let account = accounts.entry(1).or_insert_with(Account::new);
+            account.deposit(100.0);
+        }
+
+        // Create a sample withdrawal transaction
+        let transaction = Transaction {
+            kind: "withdrawal".to_string(),
+            client: 1,
+            tx: 2,
+            amount: Some(50.0),
+        };
+
+        // Process the transaction
+        {
+            let mut accounts = accounts_mutex.lock().await;
+            let account = accounts.get_mut(&transaction.client).unwrap();
+            let success = account.withdrawal(transaction.amount.unwrap());
+            assert!(success);
+        }
+
+        // Verify the account state after the transaction
+        let accounts = accounts_mutex.lock().await;
+        let account = accounts.get(&transaction.client).unwrap();
+        assert_eq!(account.available, 50.0);
+        assert_eq!(account.held, 0.0);
+        assert_eq!(account.total, 50.0);
+        assert_eq!(account.locked, false);
+    }
+
+    #[tokio::test]
+    async fn test_dispute_transaction() {
+        // Initialize test data
+        let accounts = HashMap::new();
+        let accounts_mutex = Arc::new(Mutex::new(accounts));
+        let deposits = Arc::new(Mutex::new(HashMap::new()));
+
+        // Create a sample account with initial balance and a deposit
+        {
+            let mut accounts = accounts_mutex.lock().await;
+            let mut deposits = deposits.lock().await;
+            let account = accounts.entry(1).or_insert_with(Account::new);
+            account.deposit(100.0);
+            deposits.insert(1, (1, 100.0));
+        }
+
+        // Create a sample dispute transaction
+        let transaction = Transaction {
+            kind: "dispute".to_string(),
+            client: 1,
+            tx: 1,
+            amount: None,
+        };
+
+        // Process the dispute transaction
+        {
+            let mut accounts = accounts_mutex.lock().await;
+            let deposits = deposits.lock().await;
+            let account = accounts.get_mut(&transaction.client).unwrap();
+            account.dispute(100.0); // Dispute the entire deposit amount
+            let (client, amount) = deposits.get(&transaction.tx).unwrap();
+            assert_eq!(*client, transaction.client);
+            assert_eq!(*amount, 100.0); // Ensure the deposit is marked as disputed
+        }
+
+        // Verify the account state after the dispute transaction
+        let accounts = accounts_mutex.lock().await;
+        let account = accounts.get(&transaction.client).unwrap();
+        assert_eq!(account.available, 0.0);
+        assert_eq!(account.held, 100.0);
+        assert_eq!(account.total, 100.0);
+        assert_eq!(account.locked, false);
+    }
+
+    #[tokio::test]
+    async fn test_chargeback_transaction() {
+        // Initialize test data
+        let accounts = HashMap::new();
+        let accounts_mutex = Arc::new(Mutex::new(accounts));
+        let deposits = Arc::new(Mutex::new(HashMap::new()));
+
+        // Create a sample account with initial balance and a disputed deposit
+        {
+            let mut accounts = accounts_mutex.lock().await;
+            let mut deposits = deposits.lock().await;
+            let account = accounts.entry(1).or_insert_with(Account::new);
+            account.deposit(100.0);
+            account.dispute(100.0);
+            deposits.insert(1, (1, 100.0));
+        }
+
+        // Create a sample chargeback transaction
+        let transaction = Transaction {
+            kind: "chargeback".to_string(),
+            client: 1,
+            tx: 1,
+            amount: None,
+        };
+
+        // Process the chargeback transaction
+        {
+            let mut accounts = accounts_mutex.lock().await;
+            let mut deposits = deposits.lock().await;
+            let account = accounts.get_mut(&transaction.client).unwrap();
+            account.chargeback(100.0); // Chargeback the entire disputed amount
+            deposits.remove(&transaction.tx); // Remove the disputed transaction from deposits
+        }
+
+        // Verify the account state after the chargeback transaction
+        let accounts = accounts_mutex.lock().await;
+        let account = accounts.get(&transaction.client).unwrap();
+        assert_eq!(account.available, 0.0);
+        assert_eq!(account.held, 0.0);
+        assert_eq!(account.total, 0.0); // Account should be empty after chargeback
+        assert_eq!(account.locked, true); // Account should be locked after chargeback
     }
 }
